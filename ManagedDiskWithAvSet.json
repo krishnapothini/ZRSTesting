@@ -1,0 +1,241 @@
+{
+	"$schema": "http://schema.management.azure.com/schemas/2015-01-01/deploymentTemplate.json#",
+	"contentVersion": "1.0.0.0",
+	"parameters": {
+		"resourceName": {
+			"type": "string",
+			"defaultValue": "DailyEast1C1TB"
+		},
+		"adminUsername": {
+			"type": "string",
+			"defaultValue": "xscn"
+		},
+		"adminPassword": {
+			"type": "securestring"
+		},
+		"vmSize": {
+			"type": "string",
+			"defaultValue": "Standard_Ds14_v2"
+		},
+		"vmCount": {
+			"type": "int",
+			"defaultValue": 1
+		},
+		"targetStorageTenantName": {
+			"type": "string",
+			"defaultValue": "cbn09prdstp01c"
+		},
+		"dataDisksCount": {
+			"type": "int",
+			"defaultValue": 1
+		},
+		"networkSecurityGroupName": {
+			"type": "string",
+			"defaultValue": ""
+		},
+		"osImageSpec": {
+			"type": "object",
+			"defaultValue": {
+				"publisher": "MicrosoftWindowsServer",
+				"offer": "WindowsServer",
+				"sku": "2019-Datacenter",
+				"version": "latest"
+			}
+		},
+		"osDiskSpec": {
+			"type": "object",
+			"defaultValue": {
+				"accountName": "",
+				"type": "Premium_LRS",
+				"perDiskSizeInGb": 128
+			}
+		},
+		"dataDiskSpecs": {
+			"type": "array",
+			"defaultValue": [
+				{
+					"type": "Premium_LRS",
+					"perDiskSizeInGb": 1024
+				}
+			]
+		},
+		"availabilitySet": {
+			"type": "string",
+			"defaultValue": "AvSetCBn901C"
+		}
+	},
+	"variables": {
+		"networkSecurityGroupApiVersion": "2020-05-01",
+		"nsgName": "[if(empty(parameters('networkSecurityGroupName')), concat(toLower(parameters('resourceName')),'-nsg'), parameters('networkSecurityGroupName'))]",
+		"networkApiVersion": "2018-01-01",
+		"namingInfix": "[concat('x', substring(uniqueString(toLower(parameters('resourceName'))), 0, 8))]",
+		"virtualNetworkName": "[concat(toLower(parameters('availabilitySet')),'-vnet')]",
+		"subnetName": "[concat(toLower(parameters('availabilitySet')),'-subnet')]",
+		"publicIpName": "[concat(parameters('resourceName'), '-pubip')]",
+		"nicName": "[concat(parameters('resourceName'), '-nic')]",
+		"subnetRef": "[resourceId('Microsoft.Network/virtualNetworks/subnets', variables('virtualNetworkName'), variables('subnetName'))]",
+		"addressPrefix": "10.2.3.0/24",
+		"subnetPrefix": "10.2.3.0/24",
+		"totalDiskCount": "[mul(parameters('vmCount'), parameters('dataDisksCount'))]"
+	},
+	"resources": [
+		{
+			"type": "Microsoft.Compute/disks",
+			"apiVersion": "2020-05-01",
+			"name": "[concat(parameters('resourceName'), div(copyIndex('diskLoop'), parameters('dataDisksCount')),'-dataDisk', mod(copyIndex('diskLoop'), parameters('dataDisksCount')))]",
+			"location": "[resourceGroup().location]",
+			"sku": {
+				"name": "[parameters('dataDiskSpecs')[mod(copyIndex('diskLoop'), parameters('dataDisksCount'))].type]"
+			},
+			"properties": {
+				"creationData": {
+					"createOption": "Empty",
+					"StorageStampName": "[parameters('targetStorageTenantName')]"
+				},
+				"diskSizeGB": "[parameters('dataDiskSpecs')[mod(copyIndex('diskLoop'), parameters('dataDisksCount'))].perDiskSizeInGB]"
+			},
+			"copy": {
+				"name": "diskLoop",
+				"count": "[variables('totalDiskCount')]"
+			}
+		},
+		{
+			"condition": "[empty(parameters('networkSecurityGroupName'))]",
+			"apiVersion": "[variables('networkSecurityGroupApiVersion')]",
+			"name": "[variables('nsgName')]",
+			"type": "Microsoft.Network/networkSecurityGroups",
+			"location": "[resourceGroup().location]",
+			"properties": {}
+		},
+		{
+			"apiVersion": "[variables('networkApiVersion')]",
+			"name": "[variables('virtualNetworkName')]",
+			"type": "Microsoft.Network/virtualNetworks",
+			"location": "[resourceGroup().location]",
+			"dependsOn": [
+				"[resourceId('Microsoft.Network/networkSecurityGroups', variables('nsgName'))]"
+			],
+			"properties": {
+				"addressSpace": {
+					"addressPrefixes": [
+						"[variables('addressPrefix')]"
+					]
+				},
+				"subnets": [
+					{
+						"name": "[variables('subnetName')]",
+						"properties": {
+							"addressPrefix": "[variables('subnetPrefix')]",
+							"networkSecurityGroup": {
+								"id": "[resourceId('Microsoft.Network/networkSecurityGroups',variables('nsgName'))]"
+							}
+						}
+					}
+				]
+			}
+		},
+		{
+			"type": "Microsoft.Network/publicIPAddresses",
+			"name": "[concat(variables('publicIpName'), copyIndex())]",
+			"location": "[resourceGroup().location]",
+			"apiVersion": "2017-04-01",
+			"properties": {
+				"publicIPAllocationMethod": "Dynamic"
+			},
+			"copy": {
+				"name": "ipLoop",
+				"count": "[parameters('vmCount')]"
+			}
+		},
+		{
+			"type": "Microsoft.Network/networkInterfaces",
+			"apiVersion": "2018-11-01",
+			"name": "[concat(variables('nicName'), copyIndex())]",
+			"location": "[resourceGroup().location]",
+			"dependsOn": [
+				"ipLoop",
+				"[resourceId('Microsoft.Network/virtualNetworks/', variables('virtualNetworkName'))]"
+			],
+			"properties": {
+				"ipConfigurations": [
+					{
+						"name": "ipconfig1",
+						"properties": {
+							"privateIPAllocationMethod": "Dynamic",
+							"publicIPAddress": {
+								"id": "[resourceId('Microsoft.Network/publicIPAddresses',concat(variables('publicIpName'), copyIndex()))]"
+							},
+							"subnet": {
+								"id": "[variables('subnetRef')]"
+							}
+						}
+					}
+				]
+			},
+			"copy": {
+				"name": "nicLoop",
+				"count": "[parameters('vmCount')]"
+			}
+		},
+		{
+			"type": "Microsoft.Compute/virtualMachines",
+			"apiVersion": "2018-10-01",
+			"name": "[concat(parameters('resourceName'), copyIndex())]",
+			"location": "[resourceGroup().location]",
+			"dependsOn": [
+				"nicLoop",
+				"diskLoop"
+			],
+			"properties": {
+				"hardwareProfile": {
+					"vmSize": "[parameters('vmSize')]"
+				},
+				"osProfile": {
+					"computerName": "[concat(parameters('resourceName'), copyIndex())]",
+					"adminUsername": "[parameters('adminUsername')]",
+					"adminPassword": "[parameters('adminPassword')]"
+				},
+				"storageProfile": {
+					"imageReference": "[parameters('osImageSpec')]",
+					"osDisk": {
+						"diskSizeGB": "[parameters('osDiskSpec').perDiskSizeInGB]",
+						"createOption": "FromImage",
+						"caching": "ReadWrite",
+						"managedDisk": {
+							"storageAccountType": "[parameters('osDiskSpec').type]"
+						}
+					},
+					"copy": [
+						{
+							"name": "dataDisks",
+							"count": "[parameters('dataDisksCount')]",
+							"input": {
+								"name": "[concat(parameters('resourceName'), copyIndex('vmLoop'), '-dataDisk', copyIndex('dataDisks'))]",
+								"lun": "[copyIndex('dataDisks')]",
+								"createOption": "attach",
+								"caching": "None",
+								"managedDisk": {
+									"id": "[resourceId('Microsoft.Compute/disks/', concat(parameters('resourceName'), copyIndex('vmLoop'), '-dataDisk', copyIndex('dataDisks')))]"
+								}
+							}
+						}
+					]
+				},
+				"networkProfile": {
+					"networkInterfaces": [
+						{
+							"id": "[resourceId('Microsoft.Network/networkInterfaces',concat(variables('nicName'), copyIndex()))]"
+						}
+					]
+				},
+				"availabilitySet": {
+					"id": "[resourceId('Microsoft.Compute/availabilitySets', parameters('availabilitySet'))]"
+				}
+			},
+			"copy": {
+				"name": "vmLoop",
+				"count": "[parameters('vmCount')]"
+			}
+		}
+	]
+}
